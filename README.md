@@ -1,6 +1,6 @@
 # 🚀 RAG Completo con Groq — Gratis y Ultra-Rápido
 
-Sistema de **Retrieval-Augmented Generation (RAG)** construido sobre LangChain + Groq, con soporte multilingüe, ingestión de PDFs y webs, y doble vector store (FAISS en memoria + Chroma persistente).
+Sistema de **Retrieval-Augmented Generation (RAG)** construido sobre LangChain + Groq, con soporte multilingüe, ingestión de PDFs y webs, y doble vector store (FAISS en memoria + Chroma persistente) y reranking con Cohere.
 
 ---
 
@@ -25,14 +25,14 @@ RAG (Retrieval-Augmented Generation) es una técnica que permite a un LLM respon
 ```
 Tus docs → Chunks → Vectores → Vector DB
                                    ↓
-              Pregunta → Recuperar chunks relevantes → LLM → Respuesta
+              Pregunta → Recuperar chunks relevantes → [Reranking] → LLM → Respuesta
 ```
 
 ---
 
 ## Arquitectura
 
-El pipeline sigue 6 pasos:
+El pipeline sigue 7 pasos:
 
 | Paso | Descripción |
 |------|-------------|
@@ -41,7 +41,8 @@ El pipeline sigue 6 pasos:
 | 3️⃣ **División** | Fragmenta en chunks de 1000 chars con solapamiento de 200 |
 | 4️⃣ **Embeddings** | Convierte texto a vectores con un modelo multilingüe de HuggingFace |
 | 5️⃣ **Vector Store** | Indexa en FAISS (en memoria) y Chroma (persistente en disco) |
-| 6️⃣ **Generación** | Recupera los 4 chunks más relevantes y genera respuesta con Llama 3.3 70B vía Groq |
+| 6️⃣ **Reranking** | Reordena los chunks recuperados por relevancia semántica real con Cohere |
+| 7️⃣ **Generación** | Recupera los 4 chunks más relevantes y genera respuesta con Llama 3.3 70B vía Groq |
 
 ---
 
@@ -54,6 +55,7 @@ El pipeline sigue 6 pasos:
 | [FAISS](https://github.com/facebookresearch/faiss) | Vector store en memoria, ideal para prototipos |
 | [Chroma](https://www.trychroma.com/) | Vector store persistente en disco |
 | [HuggingFace `sentence-transformers`](https://huggingface.co/sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2) | Embeddings multilingües (ES + EN en el mismo espacio vectorial) |
+| [Cohere](https://cohere.com/) | Reranking semántico de chunks — elimina ruido y mejora precisión del contexto |
 | [PyMuPDF](https://pymupdf.readthedocs.io/) | Ingestión y limpieza de PDFs |
 | [BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/) | Carga y parseo de páginas web |
 
@@ -63,6 +65,7 @@ El pipeline sigue 6 pasos:
 
 - Python 3.10+
 - Una API key gratuita de Groq → [console.groq.com/keys](https://console.groq.com/keys)
+- Una API key de Cohere → [dashboard.cohere.com](https://dashboard.cohere.com/api-keys)
 - *(Opcional)* API key de LangSmith para evaluación → [smith.langchain.com](https://smith.langchain.com)
 
 ---
@@ -72,7 +75,8 @@ El pipeline sigue 6 pasos:
 ```bash
 pip install langchain-classic langchain-groq langchain-chroma faiss-cpu \
             python-dotenv langchain-huggingface beautifulsoup4 \
-            sentence-transformers chromadb pinecone-client cohere pymupdf
+            sentence-transformers chromadb cohere langchain-cohere \
+            langchain-community pymupdf
 ```
 
 ---
@@ -84,6 +88,9 @@ Crea un fichero `.env` en la raíz del proyecto:
 ```env
 # Obligatorio
 GROQ_API_KEY=gsk_xxxxxxxxxxxxxxxxxxxx
+
+# Obligatorio para reranking
+COHERE_API_KEY=xxxxxxxxxxxxxxxxxxxx
 
 # Opcional — para evaluación con LangSmith
 LANGSMITH_API_KEY=lsv2_xxxxxxxxxxxxxxxxxxxx
@@ -137,6 +144,33 @@ rag_test(qa_chain_faiss, consulta)
 rag_test(qa_chain_chroma, consulta)
 ```
 
+### Reranking con Cohere
+
+El reranking reordena los chunks recuperados por similitud coseno aplicando un modelo de relevancia semántica más preciso. El resultado: el LLM recibe contexto más limpio y directo, eliminando chunks que rozan el tema pero no responden la pregunta concreta.
+
+```python
+from langchain_cohere import CohereRerank
+from langchain.retrievers import ContextualCompressionRetriever
+
+compressor = CohereRerank(model="rerank-multilingual-v3.0", top_n=4)
+compression_retriever = ContextualCompressionRetriever(
+    base_compressor=compressor,
+    base_retriever=vectorstore_faiss.as_retriever(search_kwargs={"k": 8})
+)
+```
+
+#### Comparativa observada (pregunta: *"¿Qué líder supremo murió?"*)
+
+| Métrica | Sin reranking | Con reranking (Cohere) |
+|---------|:---:|:---:|
+| MRR | 1.00 | 1.00 |
+| Precisión | 0.75 | 0.50 |
+
+> El MRR empata — el chunk más relevante aparece primero en ambos casos.
+> La precisión baja con reranking no es un problema: Cohere es más estricto y descarta
+> chunks que solo rozan el tema general, priorizando los directamente relevantes.
+> En producción esto se traduce en **mejor contexto para el LLM**.
+
 ### Guardar y recargar el índice FAISS
 
 ```python
@@ -176,7 +210,7 @@ vectorstore_reloaded = FAISS.load_local(
 | Mejora | Cómo | Beneficio | Estado |
 |--------|------|-----------|--------|
 | **Streaming** | `qa_chain.stream()` | Respuestas token a token en tiempo real | ⬜ Pendiente |
-| **Reranking** | `CohereRerank` | Reordena chunks recuperados → +30% precisión | ⬜ Pendiente |
+| **Reranking** | `CohereRerank` | Reordena chunks recuperados → +30% precisión | ✅ Implementado |
 | **Cloud DB** | Chroma / Pinecone | Persistencia escalable y multi-usuario | ✅ Chroma local |
 | **PDFs** | `PyMuPDFLoader` | Ingesta documentos empresariales | ✅ Implementado |
 | **Multi-idioma** | `paraphrase-multilingual-MiniLM-L12-v2` | Embeddings nativos en ES y EN | ✅ Implementado |
